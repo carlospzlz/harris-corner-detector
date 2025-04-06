@@ -54,16 +54,21 @@ impl eframe::App for MyApp {
             if let Some(frames) = frames {
                 let mut ir_frames = frames.frames_of_type::<realsense_rust::frame::InfraredFrame>();
                 let ir_frame = ir_frames.remove(0);
-                let img = infrared_frame_to_rgb_img(&ir_frame);
-                let img = image::DynamicImage::ImageRgb8(img);
+                let img = infrared_frame_to_gray_img(&ir_frame);
+                let gradient_x = imageproc::gradients::horizontal_sobel(&img);
+                let gradient_y = imageproc::gradients::vertical_sobel(&img);
+                let gradient_img = combine_gradients_into_luma_img(&gradient_x, &gradient_y);
                 let size = ui.available_size();
                 let (width, height) = (size[0].round() as u32, size[1].round() as u32);
-                let img = img
+                let gradient_img = image::DynamicImage::ImageLuma8(gradient_img);
+                let gradient_img = gradient_img
                     .resize_exact(width, height, image::imageops::FilterType::Lanczos3)
                     .to_rgb8();
-                let img =
-                    egui::ColorImage::from_rgb([width as usize, height as usize], img.as_raw());
-                let texture = egui_ctx.load_texture("unnamed", img, Default::default());
+                let img = egui::ColorImage::from_rgb(
+                    [width as usize, height as usize],
+                    gradient_img.as_raw(),
+                );
+                let texture = egui_ctx.load_texture("sobel", img, Default::default());
                 ui.image(&texture);
             }
         });
@@ -150,6 +155,20 @@ fn match_info(
     }
 }
 
+/// Convert InfraredFrame into GrayImage
+fn infrared_frame_to_gray_img(frame: &realsense_rust::frame::InfraredFrame) -> image::GrayImage {
+    let mut img = image::GrayImage::new(frame.width() as u32, frame.height() as u32);
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        match frame.get_unchecked(x as usize, y as usize) {
+            realsense_rust::frame::PixelKind::Y8 { y } => {
+                *pixel = image::Luma([*y]);
+            }
+            _ => panic!("Color type is wrong!"),
+        }
+    }
+    img
+}
+
 /// Convert InfraredFrame into RgbImage
 fn infrared_frame_to_rgb_img(frame: &realsense_rust::frame::InfraredFrame) -> image::RgbImage {
     let mut img = image::RgbImage::new(frame.width() as u32, frame.height() as u32);
@@ -160,6 +179,32 @@ fn infrared_frame_to_rgb_img(frame: &realsense_rust::frame::InfraredFrame) -> im
             }
             _ => panic!("Color type is wrong!"),
         }
+    }
+    img
+}
+
+/// Combine x and y gradients for visualisation
+fn combine_gradients_into_luma_img(
+    gradient_x: &image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
+    gradient_y: &image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
+) -> image::GrayImage {
+    if (gradient_x.width() != gradient_y.width()) || (gradient_x.height() != gradient_y.height()) {
+        panic!("Gradient images of different size!");
+    }
+
+    let (width, height) = (gradient_x.width(), gradient_x.height());
+
+    let mut img = image::GrayImage::new(width, height);
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        // Think about the gradient as a vector where gx and gy are the
+        // components, so computing the magnitude will show how much of a
+        // border a pixel is, not only horizontal/vertical but also diagonal
+        // or any direction.
+        let gx = gradient_x.get_pixel(x, y).0[0];
+        let gy = gradient_y.get_pixel(x, y).0[0];
+        let magnitude = ((gx as f32).powi(2) + (gy as f32).powi(2)).sqrt();
+        let value = magnitude.clamp(0.0, 255.0);
+        *pixel = image::Luma([value as u8]);
     }
     img
 }
