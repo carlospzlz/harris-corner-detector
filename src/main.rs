@@ -2,7 +2,15 @@ use eframe::egui;
 use std::collections::HashSet;
 use std::time::Duration;
 
-const FRAME_SIZE: (usize, usize) = (1280, 720);
+//const FRAME_SIZE: (usize, usize) = (1280, 720);
+const FRAME_SIZE: (usize, usize) = (848, 480);
+
+#[derive(Debug, PartialEq)]
+enum DebugImage {
+    Sobel,
+    R,
+    NMS,
+}
 
 fn main() -> Result<(), eframe::Error> {
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
@@ -11,7 +19,7 @@ fn main() -> Result<(), eframe::Error> {
         realsense_rust::context::Context::new().expect("Failed to create RealSense context");
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 550.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 800.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -23,6 +31,12 @@ fn main() -> Result<(), eframe::Error> {
 
 struct MyApp {
     pipeline: realsense_rust::pipeline::ActivePipeline,
+    window_size: u32,
+    k: f32,
+    nms_window_size: u32,
+    debug_img: DebugImage,
+    r_colormap_threshold1: f32,
+    r_colormap_threshold2: f32,
 }
 
 impl MyApp {
@@ -34,7 +48,15 @@ impl MyApp {
         let pipeline = realsense_rust::pipeline::InactivePipeline::try_from(&realsense_ctx)
             .expect("Failed to create inactive pipeline from context");
         let pipeline = start_pipeline(devices, pipeline);
-        Self { pipeline }
+        Self {
+            pipeline,
+            window_size: 7,
+            k: 0.05,
+            nms_window_size: 7,
+            debug_img: DebugImage::R,
+            r_colormap_threshold1: 0.33,
+            r_colormap_threshold2: 0.66,
+        }
     }
 }
 
@@ -50,26 +72,78 @@ impl eframe::App for MyApp {
             }
         };
 
+        egui::SidePanel::left("left_panel")
+            //.exact_width(130.0)
+            .show(egui_ctx, |ui| {
+                ui.add(egui::Slider::new(&mut self.window_size, 3..=20));
+                ui.horizontal(|ui| {
+                    ui.label("Debug");
+                    let separator = egui::Separator::default();
+                    ui.add(separator.horizontal());
+                });
+
+                egui::ComboBox::from_label("")
+                    .selected_text(format!("{:?}", self.debug_img))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.debug_img, DebugImage::Sobel, "Sobel");
+                        ui.selectable_value(&mut self.debug_img, DebugImage::R, "R");
+                        ui.selectable_value(&mut self.debug_img, DebugImage::NMS, "NMS");
+                    });
+
+                ui.label("R colormap");
+                ui.add(
+                    egui::Slider::new(&mut self.r_colormap_threshold1, 0.0..=1.0)
+                        .step_by(0.001)
+                        .custom_formatter(|n, _| format!("{:.3}", n)),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.r_colormap_threshold2, 0.0..=1.0)
+                        .step_by(0.005)
+                        .custom_formatter(|n, _| format!("{:.4}", n)),
+                );
+            });
+
         egui::CentralPanel::default().show(egui_ctx, |ui| {
             if let Some(frames) = frames {
                 let mut ir_frames = frames.frames_of_type::<realsense_rust::frame::InfraredFrame>();
                 let ir_frame = ir_frames.remove(0);
-                let img = infrared_frame_to_gray_img(&ir_frame);
-                let gradient_x = imageproc::gradients::horizontal_sobel(&img);
-                let gradient_y = imageproc::gradients::vertical_sobel(&img);
+                let ir_img = infrared_frame_to_gray_img(&ir_frame);
+                let gradient_x = imageproc::gradients::horizontal_sobel(&ir_img);
+                let gradient_y = imageproc::gradients::vertical_sobel(&ir_img);
                 let gradient_img = combine_gradients_into_luma_img(&gradient_x, &gradient_y);
-                let size = ui.available_size();
-                let (width, height) = (size[0].round() as u32, size[1].round() as u32);
-                let gradient_img = image::DynamicImage::ImageLuma8(gradient_img);
-                let gradient_img = gradient_img
-                    .resize_exact(width, height, image::imageops::FilterType::Lanczos3)
-                    .to_rgb8();
-                let img = egui::ColorImage::from_rgb(
-                    [width as usize, height as usize],
-                    gradient_img.as_raw(),
-                );
-                let texture = egui_ctx.load_texture("sobel", img, Default::default());
-                ui.image(&texture);
+                let response_img =
+                    compute_corner_response(gradient_x, gradient_y, self.window_size);
+                let nms_img = non_maximal_suppression(&response_img, self.window_size);
+
+                let asize = ui.available_size();
+                let size = ((asize[0].round()) as u32, (asize[1].round() / 2.0) as u32);
+                ui.vertical(|ui| {
+                    // IR image with corners
+                    let img = identify_corners(ir_img.clone(), &nms_img, self.window_size as i32);
+                    add_image_frame_item(egui_ctx, ui, "IR image".to_string(), img, size);
+
+                    match self.debug_img {
+                        DebugImage::Sobel => add_image_frame_item(
+                            egui_ctx,
+                            ui,
+                            "Sobel".to_string(),
+                            gradient_img,
+                            size,
+                        ),
+                        DebugImage::R => {
+                            let img = apply_colormap(
+                                response_img,
+                                self.r_colormap_threshold1,
+                                self.r_colormap_threshold2,
+                            );
+                            add_image_frame_item(egui_ctx, ui, "R".to_string(), img, size)
+                        }
+                        DebugImage::NMS => {
+                            let img = image::DynamicImage::ImageLuma8(nms_img).to_rgb8();
+                            add_image_frame_item(egui_ctx, ui, "NMS".to_string(), img, size)
+                        }
+                    }
+                });
             }
         });
 
@@ -169,25 +243,11 @@ fn infrared_frame_to_gray_img(frame: &realsense_rust::frame::InfraredFrame) -> i
     img
 }
 
-/// Convert InfraredFrame into RgbImage
-fn infrared_frame_to_rgb_img(frame: &realsense_rust::frame::InfraredFrame) -> image::RgbImage {
-    let mut img = image::RgbImage::new(frame.width() as u32, frame.height() as u32);
-    for (x, y, pixel) in img.enumerate_pixels_mut() {
-        match frame.get_unchecked(x as usize, y as usize) {
-            realsense_rust::frame::PixelKind::Y8 { y } => {
-                *pixel = image::Rgb([*y, *y, *y]);
-            }
-            _ => panic!("Color type is wrong!"),
-        }
-    }
-    img
-}
-
 /// Combine x and y gradients for visualisation
 fn combine_gradients_into_luma_img(
     gradient_x: &image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
     gradient_y: &image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
-) -> image::GrayImage {
+) -> image::RgbImage {
     if (gradient_x.width() != gradient_y.width()) || (gradient_x.height() != gradient_y.height()) {
         panic!("Gradient images of different size!");
     }
@@ -206,5 +266,189 @@ fn combine_gradients_into_luma_img(
         let value = magnitude.clamp(0.0, 255.0);
         *pixel = image::Luma([value as u8]);
     }
+    image::DynamicImage::ImageLuma8(img).to_rgb8()
+}
+
+///
+fn compute_corner_response(
+    gradient_x: image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
+    gradient_y: image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
+    window_size: u32,
+) -> image::GrayImage {
+    if (gradient_x.width() != gradient_y.width()) || (gradient_x.height() != gradient_y.height()) {
+        panic!("Gradient images of different size!");
+    }
+
+    let (width, height) = (gradient_x.width(), gradient_x.height());
+    let half_window_size = window_size / 2.0 as u32;
+
+    let mut corner_response = vec![0.0; (width * height) as usize];
+    let mut max_value = 0.0;
+    for x in half_window_size..(width - 1) - half_window_size {
+        for y in half_window_size..(height - 1) - half_window_size {
+            let mut gx_square_sum = 0;
+            let mut gy_square_sum = 0;
+            let mut cross_product_sum = 0;
+            for xx in x - half_window_size..x + half_window_size {
+                for yy in y - half_window_size..y + half_window_size {
+                    let gx = gradient_x.get_pixel(xx, yy).0[0];
+                    let gy = gradient_y.get_pixel(xx, yy).0[0];
+                    gx_square_sum += (gx as i32).pow(2);
+                    gy_square_sum += (gy as i32).pow(2);
+                    cross_product_sum += (gx as i32) * (gy as i32);
+                }
+            }
+
+            // Formulas from Shree Nayar video, professor in Columbia University
+            // https://www.youtube.com/watch?v=Z_HwkG90Yvw&t=440s
+            let a = gx_square_sum as f32;
+            let b = 2.0 * cross_product_sum as f32;
+            let c = gy_square_sum as f32;
+
+            let trace = a + c;
+            let sqrt_term = ((a - c).powi(2) + 4.0 * b.powi(2)).sqrt();
+            let lambda1 = (trace + sqrt_term) / 2.0;
+            let lambda2 = (trace - sqrt_term) / 2.0;
+
+            let k = 0.06;
+            let r = lambda1 * lambda2 - k * (lambda1 + lambda2).powi(2);
+            corner_response[(x * height + y) as usize] = r;
+
+            max_value = r.max(max_value);
+            //println!("{max_value}");
+        }
+    }
+
+    let mut img = image::GrayImage::new(width, height);
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        let normalized = corner_response[(x * height + y) as usize] / max_value;
+        *pixel = image::Luma([(normalized * 255.0) as u8]);
+    }
+
     img
+}
+
+fn apply_colormap(r: image::GrayImage, threshold1: f32, threshold2: f32) -> image::RgbImage {
+    let mut img = image::RgbImage::new(r.width(), r.height());
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        let normalized = r.get_pixel(x, y).0[0] as f32 / 255.0;
+        *pixel = colormap(normalized, threshold1, threshold2);
+    }
+    img
+}
+
+/// Implement color map
+/// Black -> Red -> Yellow -> White
+fn colormap(value: f32, threshold1: f32, threshold2: f32) -> image::Rgb<u8> {
+    let v = value.clamp(0.0, 1.0);
+
+    let (r, g, b) = if v < threshold1 {
+        lerp_color(v, 0.0, (0, 0, 0), threshold1, (255, 0, 0)) // Black → Red
+    } else if v < threshold2 {
+        lerp_color(v, threshold1, (255, 0, 0), threshold2, (255, 255, 0)) // Red → Yellow
+    } else {
+        lerp_color(v, threshold2, (255, 255, 0), 1.0, (255, 255, 255)) // Yellow → Black
+    };
+
+    image::Rgb([r, g, b])
+}
+
+/// Linearly interpolates between two colors based on value position.
+fn lerp_color(
+    value: f32,
+    v_min: f32,
+    c_min: (u8, u8, u8),
+    v_max: f32,
+    c_max: (u8, u8, u8),
+) -> (u8, u8, u8) {
+    let t = ((value - v_min) / (v_max - v_min)).clamp(0.0, 1.0);
+    (
+        (c_min.0 as f32 + t * (c_max.0 as f32 - c_min.0 as f32)) as u8,
+        (c_min.1 as f32 + t * (c_max.1 as f32 - c_min.1 as f32)) as u8,
+        (c_min.2 as f32 + t * (c_max.2 as f32 - c_min.2 as f32)) as u8,
+    )
+}
+
+fn non_maximal_suppression(r: &image::GrayImage, window_size: u32) -> image::GrayImage {
+    let (width, height) = (r.width(), r.height());
+
+    let mut img = image::GrayImage::new(width as u32, height as u32);
+    let half_window_size = window_size / 2.0 as u32;
+
+    for x in half_window_size..(width - 1) - half_window_size {
+        for y in half_window_size..(height - 1) - half_window_size {
+            let central_value = r.get_pixel(x, y).0[0];
+            let is_peak = || -> bool {
+                if central_value == 0 {
+                    return false;
+                }
+                for xx in x - half_window_size..x + half_window_size {
+                    for yy in y - half_window_size..y + half_window_size {
+                        let value = r.get_pixel(xx, yy).0[0];
+                        if xx == x && yy == y {
+                            continue;
+                        }
+                        if value > central_value {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }();
+            if is_peak {
+                img.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+    }
+
+    img
+}
+
+fn identify_corners(
+    ir_img: image::GrayImage,
+    nms_img: &image::GrayImage,
+    radius: i32,
+) -> image::RgbImage {
+    let mut img = image::DynamicImage::ImageLuma8(ir_img).to_rgb8();
+    for (x, y, pixel) in nms_img.enumerate_pixels() {
+        if pixel.0[0] > 0 {
+            img = imageproc::drawing::draw_hollow_circle(
+                &img,
+                (x as i32, y as i32),
+                2,
+                image::Rgb([0, 255, 0]),
+            );
+            img = imageproc::drawing::draw_hollow_circle(
+                &img,
+                (x as i32, y as i32),
+                3,
+                image::Rgb([0, 255, 0]),
+            );
+        }
+    }
+
+    img
+}
+
+fn add_image_frame_item(
+    egui_ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    title: String,
+    img: image::RgbImage,
+    size: (u32, u32),
+) {
+    // Account for title
+    let size = (size.0, size.1 - 30);
+    let img = image::DynamicImage::ImageRgb8(img);
+    let img = img
+        .resize_exact(size.0, size.1, image::imageops::FilterType::Lanczos3)
+        .to_rgb8();
+    let img = egui::ColorImage::from_rgb([size.0 as usize, size.1 as usize], img.as_raw());
+    egui::Frame::canvas(ui.style()).show(ui, |ui| {
+        ui.vertical(|ui| {
+            ui.label(title.clone());
+            let texture = egui_ctx.load_texture(title, img, Default::default());
+            ui.image(&texture);
+        });
+    });
 }
