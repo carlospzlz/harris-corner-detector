@@ -2,7 +2,6 @@ use eframe::egui;
 use std::collections::HashSet;
 use std::time::Duration;
 
-//const FRAME_SIZE: (usize, usize) = (1280, 720);
 const FRAME_SIZE: (usize, usize) = (848, 480);
 
 #[derive(Debug, PartialEq)]
@@ -56,8 +55,8 @@ impl MyApp {
             nms_window_size: 20,
             radius: 3,
             debug_img: DebugImage::R,
-            r_colormap_threshold1: 0.33,
-            r_colormap_threshold2: 0.66,
+            r_colormap_threshold1: 0.005,
+            r_colormap_threshold2: 0.1,
         }
     }
 }
@@ -77,19 +76,24 @@ impl eframe::App for MyApp {
         egui::SidePanel::left("left_panel")
             //.exact_width(130.0)
             .show(egui_ctx, |ui| {
+                ui.horizontal(|_ui| {});
                 ui.label("Harris window size:");
                 ui.add(egui::Slider::new(&mut self.window_size, 3..=20));
-                ui.label("K:");
+                ui.label("Harris K:");
                 ui.add(egui::Slider::new(&mut self.k, 0.04..=0.06));
                 ui.label("NMS window size:");
                 ui.add(egui::Slider::new(&mut self.nms_window_size, 3..=100));
                 ui.label("Visualization radius:");
                 ui.add(egui::Slider::new(&mut self.radius, 3..=20));
+                ui.horizontal(|_ui| {});
+                ui.horizontal(|_ui| {});
+
                 ui.horizontal(|ui| {
                     ui.label("Debug");
                     let separator = egui::Separator::default();
                     ui.add(separator.horizontal());
                 });
+                ui.horizontal(|_ui| {});
 
                 egui::ComboBox::from_label("")
                     .selected_text(format!("{:?}", self.debug_img))
@@ -100,12 +104,14 @@ impl eframe::App for MyApp {
                     });
 
                 ui.label("R colormap");
-                ui.add(
-                    egui::Slider::new(&mut self.r_colormap_threshold1, 0.0..=0.33)
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.r_colormap_threshold2, 0.0..=0.33)
-                );
+                ui.add(egui::Slider::new(
+                    &mut self.r_colormap_threshold1,
+                    0.0..=0.33,
+                ));
+                ui.add(egui::Slider::new(
+                    &mut self.r_colormap_threshold2,
+                    0.0..=0.33,
+                ));
             });
 
         egui::CentralPanel::default().show(egui_ctx, |ui| {
@@ -156,7 +162,7 @@ impl eframe::App for MyApp {
     }
 }
 
-/// Starts RealSense pipeline
+/// Start RealSense pipeline
 fn start_pipeline(
     devices: Vec<realsense_rust::device::Device>,
     pipeline: realsense_rust::pipeline::InactivePipeline,
@@ -210,7 +216,7 @@ fn start_pipeline(
     pipeline
 }
 
-/// Finds first Real Sense device available
+/// Find first Real Sense device available
 fn find_realsense(
     devices: Vec<realsense_rust::device::Device>,
 ) -> Option<realsense_rust::device::Device> {
@@ -223,7 +229,7 @@ fn find_realsense(
     None
 }
 
-/// Gets info from a device or returns "N/A"
+/// Get info from a device or returns "N/A"
 fn match_info(
     device: &realsense_rust::device::Device,
     info_param: realsense_rust::kind::Rs2CameraInfo,
@@ -274,7 +280,7 @@ fn combine_gradients_into_luma_img(
     image::DynamicImage::ImageLuma8(img).to_rgb8()
 }
 
-/// This is the heart of this methodology
+/// This is the heart of Harris method
 fn compute_corner_response(
     gradient_x: image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
     gradient_y: image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
@@ -320,7 +326,6 @@ fn compute_corner_response(
             corner_response[(x * height + y) as usize] = r;
 
             max_value = r.max(max_value);
-            //println!("{max_value}");
         }
     }
 
@@ -333,6 +338,7 @@ fn compute_corner_response(
     img
 }
 
+/// Apply colormap to R image to easily visualise potential corners
 fn apply_colormap(r: image::GrayImage, threshold1: f32, threshold2: f32) -> image::RgbImage {
     let mut img = image::RgbImage::new(r.width(), r.height());
     for (x, y, pixel) in img.enumerate_pixels_mut() {
@@ -374,6 +380,7 @@ fn lerp_color(
     )
 }
 
+/// Suppress neighbors that are not maximal
 fn non_maximal_suppression(r: &image::GrayImage, window_size: u32) -> Vec<(u32, u32)> {
     let mut corners = Vec::<(u32, u32)>::new();
 
@@ -409,6 +416,7 @@ fn non_maximal_suppression(r: &image::GrayImage, window_size: u32) -> Vec<(u32, 
     corners
 }
 
+/// Create NMS image from vector of corners
 fn create_nms_img(corners: &Vec<(u32, u32)>, widht: u32, height: u32) -> image::RgbImage {
     let mut img = image::RgbImage::new(widht, height);
     for (x, y) in corners {
@@ -417,6 +425,7 @@ fn create_nms_img(corners: &Vec<(u32, u32)>, widht: u32, height: u32) -> image::
     img
 }
 
+/// Draw circles on identified corners in IR image
 fn identify_corners(
     ir_img: image::GrayImage,
     corners: &Vec<(u32, u32)>,
@@ -441,6 +450,7 @@ fn identify_corners(
     img
 }
 
+/// Convenience method to add image element to UI
 fn add_image_frame_item(
     egui_ctx: &egui::Context,
     ui: &mut egui::Ui,
