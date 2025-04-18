@@ -34,6 +34,7 @@ struct MyApp {
     window_size: u32,
     k: f32,
     nms_window_size: u32,
+    radius: u32,
     debug_img: DebugImage,
     r_colormap_threshold1: f32,
     r_colormap_threshold2: f32,
@@ -52,7 +53,8 @@ impl MyApp {
             pipeline,
             window_size: 7,
             k: 0.05,
-            nms_window_size: 7,
+            nms_window_size: 20,
+            radius: 3,
             debug_img: DebugImage::R,
             r_colormap_threshold1: 0.33,
             r_colormap_threshold2: 0.66,
@@ -75,7 +77,14 @@ impl eframe::App for MyApp {
         egui::SidePanel::left("left_panel")
             //.exact_width(130.0)
             .show(egui_ctx, |ui| {
+                ui.label("Harris window size:");
                 ui.add(egui::Slider::new(&mut self.window_size, 3..=20));
+                ui.label("K:");
+                ui.add(egui::Slider::new(&mut self.k, 0.04..=0.06));
+                ui.label("NMS window size:");
+                ui.add(egui::Slider::new(&mut self.nms_window_size, 3..=100));
+                ui.label("Visualization radius:");
+                ui.add(egui::Slider::new(&mut self.radius, 3..=20));
                 ui.horizontal(|ui| {
                     ui.label("Debug");
                     let separator = egui::Separator::default();
@@ -92,14 +101,10 @@ impl eframe::App for MyApp {
 
                 ui.label("R colormap");
                 ui.add(
-                    egui::Slider::new(&mut self.r_colormap_threshold1, 0.0..=1.0)
-                        .step_by(0.001)
-                        .custom_formatter(|n, _| format!("{:.3}", n)),
+                    egui::Slider::new(&mut self.r_colormap_threshold1, 0.0..=0.33)
                 );
                 ui.add(
-                    egui::Slider::new(&mut self.r_colormap_threshold2, 0.0..=1.0)
-                        .step_by(0.005)
-                        .custom_formatter(|n, _| format!("{:.4}", n)),
+                    egui::Slider::new(&mut self.r_colormap_threshold2, 0.0..=0.33)
                 );
             });
 
@@ -112,14 +117,14 @@ impl eframe::App for MyApp {
                 let gradient_y = imageproc::gradients::vertical_sobel(&ir_img);
                 let gradient_img = combine_gradients_into_luma_img(&gradient_x, &gradient_y);
                 let response_img =
-                    compute_corner_response(gradient_x, gradient_y, self.window_size);
-                let nms_img = non_maximal_suppression(&response_img, self.window_size);
+                    compute_corner_response(gradient_x, gradient_y, self.window_size, self.k);
+                let corners = non_maximal_suppression(&response_img, self.nms_window_size);
 
                 let asize = ui.available_size();
                 let size = ((asize[0].round()) as u32, (asize[1].round() / 2.0) as u32);
                 ui.vertical(|ui| {
                     // IR image with corners
-                    let img = identify_corners(ir_img.clone(), &nms_img, self.window_size as i32);
+                    let img = identify_corners(ir_img.clone(), &corners, self.radius);
                     add_image_frame_item(egui_ctx, ui, "IR image".to_string(), img, size);
 
                     match self.debug_img {
@@ -139,7 +144,7 @@ impl eframe::App for MyApp {
                             add_image_frame_item(egui_ctx, ui, "R".to_string(), img, size)
                         }
                         DebugImage::NMS => {
-                            let img = image::DynamicImage::ImageLuma8(nms_img).to_rgb8();
+                            let img = create_nms_img(&corners, ir_img.width(), ir_img.height());
                             add_image_frame_item(egui_ctx, ui, "NMS".to_string(), img, size)
                         }
                     }
@@ -269,11 +274,12 @@ fn combine_gradients_into_luma_img(
     image::DynamicImage::ImageLuma8(img).to_rgb8()
 }
 
-///
+/// This is the heart of this methodology
 fn compute_corner_response(
     gradient_x: image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
     gradient_y: image::ImageBuffer<image::Luma<i16>, Vec<i16>>,
     window_size: u32,
+    k: f32,
 ) -> image::GrayImage {
     if (gradient_x.width() != gradient_y.width()) || (gradient_x.height() != gradient_y.height()) {
         panic!("Gradient images of different size!");
@@ -310,7 +316,6 @@ fn compute_corner_response(
             let lambda1 = (trace + sqrt_term) / 2.0;
             let lambda2 = (trace - sqrt_term) / 2.0;
 
-            let k = 0.06;
             let r = lambda1 * lambda2 - k * (lambda1 + lambda2).powi(2);
             corner_response[(x * height + y) as usize] = r;
 
@@ -369,10 +374,10 @@ fn lerp_color(
     )
 }
 
-fn non_maximal_suppression(r: &image::GrayImage, window_size: u32) -> image::GrayImage {
-    let (width, height) = (r.width(), r.height());
+fn non_maximal_suppression(r: &image::GrayImage, window_size: u32) -> Vec<(u32, u32)> {
+    let mut corners = Vec::<(u32, u32)>::new();
 
-    let mut img = image::GrayImage::new(width as u32, height as u32);
+    let (width, height) = (r.width(), r.height());
     let half_window_size = window_size / 2.0 as u32;
 
     for x in half_window_size..(width - 1) - half_window_size {
@@ -396,35 +401,41 @@ fn non_maximal_suppression(r: &image::GrayImage, window_size: u32) -> image::Gra
                 return true;
             }();
             if is_peak {
-                img.put_pixel(x, y, image::Luma([255]));
+                corners.push((x, y));
             }
         }
     }
 
+    corners
+}
+
+fn create_nms_img(corners: &Vec<(u32, u32)>, widht: u32, height: u32) -> image::RgbImage {
+    let mut img = image::RgbImage::new(widht, height);
+    for (x, y) in corners {
+        img.put_pixel(*x, *y, image::Rgb([255, 255, 255]));
+    }
     img
 }
 
 fn identify_corners(
     ir_img: image::GrayImage,
-    nms_img: &image::GrayImage,
-    radius: i32,
+    corners: &Vec<(u32, u32)>,
+    radius: u32,
 ) -> image::RgbImage {
     let mut img = image::DynamicImage::ImageLuma8(ir_img).to_rgb8();
-    for (x, y, pixel) in nms_img.enumerate_pixels() {
-        if pixel.0[0] > 0 {
-            img = imageproc::drawing::draw_hollow_circle(
-                &img,
-                (x as i32, y as i32),
-                2,
-                image::Rgb([0, 255, 0]),
-            );
-            img = imageproc::drawing::draw_hollow_circle(
-                &img,
-                (x as i32, y as i32),
-                3,
-                image::Rgb([0, 255, 0]),
-            );
-        }
+    for (x, y) in corners {
+        img = imageproc::drawing::draw_hollow_circle(
+            &img,
+            (*x as i32, *y as i32),
+            radius as i32,
+            image::Rgb([0, 255, 0]),
+        );
+        img = imageproc::drawing::draw_hollow_circle(
+            &img,
+            (*x as i32, *y as i32),
+            (radius + 1) as i32,
+            image::Rgb([0, 255, 0]),
+        );
     }
 
     img
