@@ -120,8 +120,9 @@ impl eframe::App for MyApp {
                         ui.selectable_value(&mut self.debug_img, DebugImage::R, "R");
                         ui.selectable_value(&mut self.debug_img, DebugImage::NMS, "NMS");
                     });
+                ui.horizontal(|_ui| {});
 
-                ui.label("R colormap");
+                ui.label("R colormap:");
                 ui.add(egui::Slider::new(
                     &mut self.r_colormap_threshold1,
                     0.0..=0.33,
